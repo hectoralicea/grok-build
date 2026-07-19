@@ -97,6 +97,9 @@ pub struct AuthMethodsBuildInputs<'a> {
     /// Config pin (`[auth] preferred_method`). `None` keeps multi-method
     /// fallthrough; `Some` is fail-closed (only that method family).
     pub preferred_method: Option<PreferredAuthMethod>,
+    /// When true, do not advertise interactive `grok.com` / OIDC login.
+    /// Requires BYOK / API-key credentials (`has_external_api_key`).
+    pub allow_anonymous: bool,
 }
 
 /// Output of [`build_auth_methods`].
@@ -145,7 +148,14 @@ pub fn build_auth_methods(inputs: AuthMethodsBuildInputs<'_>) -> BuiltAuthMethod
         login_label,
         has_auth_provider_command,
         preferred_method,
+        allow_anonymous,
     } = inputs;
+
+    // Anonymous mode is fail-closed local/BYOK-only: never offer browser OAuth.
+    // Equivalent to preferred_method=api_key for listing purposes when enabled.
+    if allow_anonymous {
+        return build_pinned_api_key(has_external_api_key);
+    }
 
     match preferred_method {
         Some(PreferredAuthMethod::ApiKey) => build_pinned_api_key(has_external_api_key),
@@ -170,7 +180,7 @@ pub fn build_auth_methods(inputs: AuthMethodsBuildInputs<'_>) -> BuiltAuthMethod
 fn build_pinned_api_key(has_external_api_key: bool) -> BuiltAuthMethods {
     if !has_external_api_key {
         xai_grok_telemetry::unified_log::warn(
-            "auth: preferred_method=api_key but no API key credentials available",
+            "auth: api_key/anonymous mode but no API key credentials available",
             None,
             None,
         );
@@ -418,6 +428,9 @@ pub fn method_id_after_cached_token_unavailable(
 /// Error when `preferred_method=api_key` but no key/BYOK credentials exist.
 pub const PREFERRED_API_KEY_UNAVAILABLE: &str = "preferred_method=api_key but no API key is configured (set XAI_API_KEY or model api_key/env_key in config.toml).";
 
+/// Error when anonymous mode is on but no local/BYOK credentials exist.
+pub const ANONYMOUS_MODE_NO_CREDENTIALS: &str = "allow_anonymous is enabled but no API key / model credentials are configured. Set a local [model.*] api_key (e.g. LiteLLM) or XAI_API_KEY, or disable allow_anonymous and run `grok login`.";
+
 /// Error when `preferred_method=oidc` but the session path cannot proceed.
 pub const PREFERRED_OIDC_UNAVAILABLE: &str =
     "preferred_method=oidc but no session is available. Run `grok login` to authenticate.";
@@ -568,6 +581,7 @@ mod tests {
             login_label: None,
             has_auth_provider_command: false,
             preferred_method: None,
+            allow_anonymous: false,
         }
     }
 
@@ -1101,5 +1115,100 @@ mod tests {
         });
         assert_eq!(method_ids(&built), vec![GROK_COM_METHOD_ID]);
         assert!(built.default_auth_method_id.is_none());
+    }
+
+    // ── Anonymous / local-only mode ─────────────────────────────────────
+
+    /// Local LiteLLM/Ollama users: allow_anonymous + per-model credentials
+    /// must advertise only `xai.api_key` and never interactive `grok.com`.
+    #[test]
+    fn anonymous_with_byok_skips_interactive_login() {
+        let built = build_auth_methods(AuthMethodsBuildInputs {
+            has_external_api_key: true,
+            has_cached_token: false,
+            allow_anonymous: true,
+            ..default_inputs()
+        });
+        assert_eq!(method_ids(&built), vec![XAI_API_KEY_METHOD_ID]);
+        assert_eq!(default_id(&built), Some(XAI_API_KEY_METHOD_ID));
+        assert!(
+            !AuthMethodKind::from_id(built.methods[0].id()).needs_interactive_login(),
+            "anonymous mode first method must not open a browser",
+        );
+        assert!(
+            !built
+                .methods
+                .iter()
+                .any(|m| AuthMethodKind::from_id(m.id()) == AuthMethodKind::GrokCom),
+            "anonymous mode must not advertise grok.com / auth.x.ai login",
+        );
+    }
+
+    /// Anonymous mode without credentials fails closed (empty methods), so
+    /// the pager cannot fall through to browser OAuth.
+    #[test]
+    fn anonymous_without_credentials_fails_closed() {
+        let built = build_auth_methods(AuthMethodsBuildInputs {
+            has_external_api_key: false,
+            has_cached_token: true, // session token must NOT resurrect login path
+            allow_anonymous: true,
+            ..default_inputs()
+        });
+        assert!(
+            built.methods.is_empty(),
+            "anonymous without BYOK/API key must advertise no methods"
+        );
+        assert!(built.default_auth_method_id.is_none());
+    }
+
+    /// Anonymous wins over preferred_method=oidc for listing: no interactive
+    /// login is offered even if oidc was pinned.
+    #[test]
+    fn anonymous_overrides_preferred_oidc_listing() {
+        let built = build_auth_methods(AuthMethodsBuildInputs {
+            has_external_api_key: true,
+            has_cached_token: true,
+            preferred_method: Some(PreferredAuthMethod::Oidc),
+            allow_anonymous: true,
+            ..default_inputs()
+        });
+        assert_eq!(method_ids(&built), vec![XAI_API_KEY_METHOD_ID]);
+        assert!(
+            !built
+                .methods
+                .iter()
+                .any(|m| AuthMethodKind::from_id(m.id()).needs_interactive_login())
+        );
+    }
+
+    /// Config helper: allow_anonymous_enabled reads config and env.
+    #[test]
+    #[serial]
+    fn allow_anonymous_enabled_from_config_and_env() {
+        use crate::auth::GrokComConfig;
+
+        let _unset = EnvGuard::unset("GROK_ALLOW_ANONYMOUS");
+        let off = GrokComConfig {
+            allow_anonymous: None,
+            ..GrokComConfig::default()
+        };
+        assert!(!off.allow_anonymous_enabled());
+
+        let on_cfg = GrokComConfig {
+            allow_anonymous: Some(true),
+            ..GrokComConfig::default()
+        };
+        assert!(on_cfg.allow_anonymous_enabled());
+        assert!(
+            on_cfg.blocks_automatic_oidc(),
+            "anonymous must block automatic OIDC"
+        );
+
+        let _env = EnvGuard::set("GROK_ALLOW_ANONYMOUS", "1");
+        let env_on = GrokComConfig {
+            allow_anonymous: None,
+            ..GrokComConfig::default()
+        };
+        assert!(env_on.allow_anonymous_enabled());
     }
 }

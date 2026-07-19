@@ -92,6 +92,18 @@ pub struct GrokComConfig {
     /// multi-method fallthrough. Config.toml only (`[auth] preferred_method`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preferred_method: Option<PreferredAuthMethod>,
+    /// Allow fully local / anonymous sessions with no xAI browser login.
+    ///
+    /// When true (or `GROK_ALLOW_ANONYMOUS=1`), interactive `grok.com` / OIDC
+    /// login methods are **not** advertised. Auth succeeds only via
+    /// `XAI_API_KEY` or per-model `[model.*] api_key` / `env_key` (BYOK), which
+    /// is how local LiteLLM/Ollama endpoints are configured. Without those
+    /// credentials, auth fails closed (no silent redirect to auth.x.ai).
+    ///
+    /// Config: `[auth] allow_anonymous = true` (also accepted under
+    /// `[grok_com_config]`). Env: `GROK_ALLOW_ANONYMOUS`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_anonymous: Option<bool>,
 }
 /// Team login restriction. TOML string or array; an empty array fails closed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -212,6 +224,20 @@ impl GrokComConfig {
     /// this by not consulting automatic flow helpers.
     pub fn blocks_automatic_oidc(&self) -> bool {
         matches!(self.preferred_method, Some(PreferredAuthMethod::ApiKey))
+            || self.allow_anonymous_enabled()
+    }
+
+    /// Whether anonymous / local-only auth is enabled.
+    ///
+    /// True when config sets `allow_anonymous = true`, or when the process
+    /// environment has a truthy `GROK_ALLOW_ANONYMOUS`. The env flag is OR-ed
+    /// in live so a one-shot shell can force local mode without editing
+    /// `config.toml`.
+    pub fn allow_anonymous_enabled(&self) -> bool {
+        self.allow_anonymous == Some(true)
+            || std::env::var("GROK_ALLOW_ANONYMOUS")
+                .ok()
+                .is_some_and(|v| env_flag_enabled(&v))
     }
     /// The auth.json scope key for this config.
     pub fn auth_scope(&self) -> String {
@@ -302,6 +328,11 @@ impl Default for GrokComConfig {
                 .map(|v| env_flag_enabled(&v)),
             force_login_team_uuid: None,
             preferred_method: None,
+            allow_anonymous: std::env::var("GROK_ALLOW_ANONYMOUS")
+                .ok()
+                .map(|v| env_flag_enabled(&v))
+                .filter(|&v| v)
+                .map(|_| true),
         }
     }
 }

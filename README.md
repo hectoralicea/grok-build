@@ -82,6 +82,38 @@ The binary artifact is named `xai-grok-pager`; official installs ship it as
 `grok`. On first launch it opens your browser to authenticate — see the
 [authentication guide](crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md).
 
+### Anonymous / local-only mode (this fork)
+
+To run **without** `grok login` / `auth.x.ai`, use a custom model that carries its
+own key and enable anonymous auth:
+
+```toml
+# ~/.grok/config.toml
+[auth]
+allow_anonymous = true
+# optional: pin to API-key / BYOK path
+preferred_method = "api_key"
+
+[models]
+default = "litellm"
+
+[model.litellm]
+model = "qwen-coder"
+base_url = "http://localhost:8000/v1"
+api_key = "local"          # any non-empty value for a local LiteLLM/Ollama router
+name = "LiteLLM Smart Router"
+```
+
+Or one-shot:
+
+```sh
+GROK_ALLOW_ANONYMOUS=1 grok -m litellm
+```
+
+When `allow_anonymous` is on, interactive `grok.com` / OIDC login is **not**
+advertised. Auth succeeds only via `XAI_API_KEY` or per-model `api_key` /
+`env_key`. Without those credentials, auth fails closed (no browser fallback).
+
 ## Documentation
 
 Full online documentation is available at

@@ -311,6 +311,7 @@ impl acp::Agent for MvpAgent {
             Some(crate::auth::PreferredAuthMethod::ApiKey) => false,
             _ => has_cached_token,
         };
+        let allow_anonymous = self.cfg.borrow().grok_com_config.allow_anonymous_enabled();
         let built = auth_method::build_auth_methods(auth_method::AuthMethodsBuildInputs {
             has_external_api_key,
             has_cached_token,
@@ -319,6 +320,7 @@ impl acp::Agent for MvpAgent {
             login_label: login_label.as_deref(),
             has_auth_provider_command: has_auth_provider,
             preferred_method,
+            allow_anonymous,
         });
         let auth_methods = built.methods;
         xai_grok_telemetry::unified_log::info(
