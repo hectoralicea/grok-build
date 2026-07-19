@@ -2318,6 +2318,47 @@ async fn auth_type_xai_api_key_no_current_returns_api_key() {
              behavior to fall back to."
     );
 }
+
+/// BYOK method + leftover OIDC token in memory must still report ApiKey
+/// (not SessionToken). Without this, local LiteLLM turns hijack the OIDC
+/// bearer and surface ReAuthRequired.
+#[tokio::test(flavor = "current_thread")]
+async fn auth_type_xai_api_key_with_leftover_session_returns_api_key() {
+    use crate::auth::GrokAuth;
+    let agent = build_minimal_agent_for_tests();
+    agent.set_auth_method(acp::AuthMethodId::new(
+        crate::agent::auth_method::XAI_API_KEY_METHOD_ID,
+    ));
+    agent.auth_manager.hot_swap(GrokAuth::test_default());
+    assert!(agent.auth_manager.current().is_some());
+    assert_eq!(
+        agent.auth_type(),
+        xai_chat_state::AuthType::ApiKey,
+        "xai.api_key method must win over a leftover session token"
+    );
+}
+
+/// allow_anonymous forces ApiKey even with a live OIDC token and no method id.
+#[tokio::test(flavor = "current_thread")]
+async fn auth_type_anonymous_with_leftover_session_returns_api_key() {
+    use crate::agent::config::Config as AgentConfig;
+    use crate::auth::{AuthManager, GrokAuth, GrokComConfig};
+    let temp_dir = tempfile::tempdir().unwrap();
+    let auth_manager =
+        std::sync::Arc::new(AuthManager::new(temp_dir.path(), GrokComConfig::default()));
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let gateway = GatewaySender::new(tx);
+    let mut cfg = AgentConfig::default();
+    cfg.grok_com_config.allow_anonymous = Some(true);
+    let agent = MvpAgent::new(gateway, &cfg, auth_manager, None).expect("valid test config");
+    agent.auth_manager.hot_swap(GrokAuth::test_default());
+    assert!(agent.auth_manager.current().is_some());
+    assert_eq!(
+        agent.auth_type(),
+        xai_chat_state::AuthType::ApiKey,
+        "allow_anonymous must ignore leftover OIDC tokens"
+    );
+}
 /// Positive baseline: when both signals agree (session-based method AND
 /// a live in-memory token), `SessionToken` is returned. This is the
 /// common case during a healthy session.

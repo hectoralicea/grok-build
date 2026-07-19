@@ -703,6 +703,23 @@ impl MvpAgent {
     /// The session-based clause is load-bearing: without it, chat_state can get
     /// locked into `auth_type = ApiKey` and skip token refresh on later prompts.
     pub(crate) fn auth_type(&self) -> xai_chat_state::AuthType {
+        // Anonymous / local-only mode must never route chat as SessionToken,
+        // even if auth.json still holds a leftover OIDC token from a prior
+        // `grok login`. That leftover was the cause of ReAuthRequired banners
+        // when using LiteLLM/Ollama with allow_anonymous.
+        if self.cfg.borrow().grok_com_config.allow_anonymous_enabled() {
+            return xai_chat_state::AuthType::ApiKey;
+        }
+        // Explicit BYOK method (`xai.api_key`) also wins over a leftover
+        // in-memory session token — the method is the mechanism of record.
+        if self
+            .auth_method_id
+            .load()
+            .as_deref()
+            .is_some_and(|id| crate::agent::auth_method::AuthMethodKind::from_id(id).is_api_key())
+        {
+            return xai_chat_state::AuthType::ApiKey;
+        }
         if self.auth_manager.current().is_some() || self.is_session_based_auth() {
             xai_chat_state::AuthType::SessionToken
         } else {
@@ -1117,17 +1134,27 @@ impl MvpAgent {
         origin_client: Option<crate::http::OriginClientInfo>,
     ) -> SamplingConfig {
         let preferred = self.cfg.borrow().grok_com_config.preferred_method;
-        let session = match preferred {
-            Some(crate::auth::PreferredAuthMethod::ApiKey) => None,
-            _ if self.is_session_based_auth() => self.auth_manager.current_or_expired(),
-            _ => None,
+        let anonymous = self.cfg.borrow().grok_com_config.allow_anonymous_enabled();
+        // Local/anonymous and preferred api_key: never attach an OIDC/session
+        // bearer. Also skip session when the model already has its own key
+        // (LiteLLM/Ollama BYOK) so a leftover auth.json cannot hijack the turn.
+        let force_byok = anonymous
+            || matches!(preferred, Some(crate::auth::PreferredAuthMethod::ApiKey))
+            || model.has_own_credentials();
+        let session = if force_byok {
+            None
+        } else if self.is_session_based_auth() {
+            self.auth_manager.current_or_expired()
+        } else {
+            None
         };
         let has_session_key = session.is_some();
         let mut credentials = resolve_credentials(
             model,
             session.as_ref().map(|a| a.key.as_str()),
         );
-        if matches!(preferred, Some(crate ::auth::PreferredAuthMethod::Oidc))
+        if !anonymous
+            && matches!(preferred, Some(crate::auth::PreferredAuthMethod::Oidc))
             && !model.has_own_credentials()
             && credentials.auth_type == xai_chat_state::AuthType::ApiKey
         {
@@ -1139,8 +1166,12 @@ impl MvpAgent {
             self.cfg.borrow().grok_com_config.api_key_auth_disabled(),
             session.as_ref().map(|a| a.key.as_str()),
         );
-        if !has_session_key && credentials.auth_type == xai_chat_state::AuthType::ApiKey
-            && !model.has_own_credentials() && self.is_session_based_auth()
+        // Never demote a BYOK/anonymous model to SessionToken.
+        if !force_byok
+            && !has_session_key
+            && credentials.auth_type == xai_chat_state::AuthType::ApiKey
+            && !model.has_own_credentials()
+            && self.is_session_based_auth()
         {
             tracing::info!(
                 model = model.info().model.as_str(),

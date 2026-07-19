@@ -88,11 +88,11 @@ To run **without** `grok login` / `auth.x.ai`, use a custom model that carries i
 own key and enable anonymous auth:
 
 ```toml
-# ~/.grok/config.toml
+# ~/.grok/config.toml  (fork binary only for allow_anonymous)
 [auth]
 allow_anonymous = true
-# optional: pin to API-key / BYOK path
-preferred_method = "api_key"
+# Prefer NOT setting preferred_method=api_key if you also use stock Grok —
+# that pin can break stock when no real XAI_API_KEY is set.
 
 [models]
 default = "litellm"
@@ -104,15 +104,23 @@ api_key = "local"          # any non-empty value for a local LiteLLM/Ollama rout
 name = "LiteLLM Smart Router"
 ```
 
-Or one-shot:
+Or one-shot (safest with stock config left alone):
 
 ```sh
-GROK_ALLOW_ANONYMOUS=1 grok -m litellm
+# Exit stock Grok first. Prefer a *new* session until local path is proven.
+GROK_ALLOW_ANONYMOUS=1 ./target/release/xai-grok-pager -m litellm
 ```
 
-When `allow_anonymous` is on, interactive `grok.com` / OIDC login is **not**
-advertised. Auth succeeds only via `XAI_API_KEY` or per-model `api_key` /
-`env_key`. Without those credentials, auth fails closed (no browser fallback).
+When `allow_anonymous` is on:
+
+- Interactive `grok.com` / OIDC login is **not** advertised
+- Leftover `auth.json` OIDC tokens are **ignored** for chat routing (ApiKey/BYOK path)
+- Per-model `api_key` / `env_key` or `XAI_API_KEY` is required
+- Without those credentials, auth fails closed (no browser fallback)
+
+**Do not** put `preferred_method = "api_key"` in config shared with **stock** Grok
+unless you always have a real API key or model BYOK — stock will pin to api_key
+and can show re-auth errors when the active model is still a cloud Grok model.
 
 ## Documentation
 
